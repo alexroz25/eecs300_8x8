@@ -14,12 +14,15 @@
 */
 
 #include <Wire.h>
+#include <deque>
 
 #include <SparkFun_VL53L5CX_Library.h> //http://librarymanager/All#SparkFun_VL53L5CX
+
 
 #define THRESHOLD_DETECT 0.8   // dist < 0.8 * calibrate => object_detected = true;
 #define THRESHOLD_UNDETECT 0.9 // dist > 0.9 * calibrate => object_detected = false;
 #define THRESHOLD_DIFF_MOVE 0.4 // diff_matrix > 0.2 * calibration = leaving square, diff_matrix < -0.2 * calibration = entering square
+#define DEQUE_SIZE 6
 
 typedef struct pair {
   //       x
@@ -29,18 +32,26 @@ typedef struct pair {
   //   2 d d d
   int y;
   int x;
+  pair() {
+    y = -1;
+    x = -1;
+  }
+  pair(int yi, int xi) {
+    y = yi;
+    x = xi;
+  }
 } pair_t;
 
 typedef struct bounding_box {
-  pair_t curr_pos;
-  pair_t prev_pos;
+  std::deque<pair_t> pos_history; // store last DEQUE_SIZE items
+  bounding_box(){}
 } bounding_box_t;
 
 SparkFun_VL53L5CX myImager;
 // Result data class structure, 1356 byes of RAM
 VL53L5CX_ResultsData measurementData;
 
-bounding_box_t* objects = (bounding_box_t*)malloc(8 * sizeof(bounding_box_t));
+bounding_box_t objects[8];
 int16_t objects_count = 0; // # people currently being detected
 
 bool calibrated = false;//  y  x
@@ -78,7 +89,26 @@ void update_diff_matrix() {
   }
 }
 
-bool detected = false;
+int calculate_dir_mag(bounding_box_t &b) {
+  int result = 0;
+  for (int i = 0; i < DEQUE_SIZE-1; i++) {
+    int y_new = b.pos_history[i+1].y;
+    int y_old = b.pos_history[i].y;
+        // new data           // old data
+    if (y_new != -1  && y_old != -1) {
+      result = y_new > y_old ? result+1 : y_new < y_old ? result-1 : result;
+    }
+  }
+  return result;
+}
+
+bool check_past_threshold(bounding_box_t &b, int t) {
+  for (int i = 0; i < DEQUE_SIZE-1; i++) {
+    if (b.pos_history[i].y == t) return true;
+  }
+  return false;
+}
+
 void detect() {
   for (int y = 0; y <= imageWidth * (imageWidth - 1); y+= imageWidth) {
     for (int x = 0; x < imageWidth; x++) {
@@ -103,18 +133,20 @@ void detect() {
     }
   }
   if (minY != 8) {
-    
-  }
-  objects[0].prev_pos = objects[0].curr_pos;
-  objects[0].curr_pos.y = minY + (maxY-minY)/2;
-  objects[0].curr_pos.x = minX + (maxX-minX)/2;
+    objects[0].pos_history.emplace_back((minY+maxY)/2,(minX+maxX)/2);
+    if (objects[0].pos_history.size() > DEQUE_SIZE) objects[0].pos_history.pop_front();
   
-  if (objects[0].curr_pos.y == 3 && objects[0].curr_pos.y > objects[0].prev_pos.y) {
-    person_count++;
+    #define Y_LINE 2
+    if (objects[0].pos_history.back().y == Y_LINE && calculate_dir_mag(objects[0]) >= 1 && !check_past_threshold(objects[0],Y_LINE)) {
+      person_count++;
+    }
+    else if (objects[0].pos_history.back().y == Y_LINE && calculate_dir_mag(objects[0]) <= -1 && !check_past_threshold(objects[0],Y_LINE)) {
+      person_count--;
+    }
+    #undef Y_LINE
   }
-  else if (objects[0].curr_pos.y == 3 && objects[0].curr_pos.y < objects[0].prev_pos.y) {
-    person_count--;
-  }
+  
+  
 }
 
 void setup()
@@ -172,6 +204,7 @@ void loop()
 
       if (!calibrated) {
         calibrate();
+        Serial.println("Calibrated");
       }
 
       update_diff_matrix();
@@ -205,4 +238,3 @@ void loop()
   delay(5); //Small delay between polling
 
 }
-
